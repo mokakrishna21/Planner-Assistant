@@ -5,172 +5,328 @@ import tools as tool_runner
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import numpy as np
+import textwrap
 
 
 def safe_json_loads(s):
+    """Parse JSON with aggressive cleaning for common LLM errors."""
+    if not s or not isinstance(s, str):
+        raise ValueError("Empty or non-string input")
+    
+    # Remove control chars
     s = re.sub(r"[\x00-\x1F\x7F]", "", s)
-    return json.loads(s)
+    # Remove trailing commas before ] or }
+    s = re.sub(r",\s*(\]|\})", r"\1", s)
+    # Fix single quotes to double quotes (common LLM mistake)
+    s = re.sub(r"(?<!\\)'", '"', s)
+    
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError as e:
+        # Try to extract just the array/object if wrapped in markdown
+        s = re.sub(r'^```json\s*', '', s)
+        s = re.sub(r'^```\s*', '', s)
+        s = re.sub(r'\s*```$', '', s)
+        return json.loads(s)
 
 
 def extract_json(s):
-    match = re.search(r'(\[.*\]|\{.*\})', s, re.DOTALL)
-    return match.group(0) if match else s
+    """Extract JSON array or object from text, handling nested structures."""
+    if not s:
+        return "[]"
+    
+    # Try to find outermost array or object
+    s = s.strip()
+    if s.startswith('[') and s.endswith(']'):
+        return s
+    if s.startswith('{') and s.endswith('}'):
+        return s
+    
+    # Look for JSON blocks
+    match = re.search(r'(\[[\s\S]*\]|\{[\s\S]*\})', s)
+    if match:
+        return match.group(0)
+    
+    return s
+
+
+def format_result_for_context(result):
+    """Convert query results to display-friendly strings."""
+    if isinstance(result, bool):
+        return "Yes" if result else "No"
+    elif isinstance(result, (int, np.integer)):
+        return f"{int(result):,}"
+    elif isinstance(result, (float, np.floating)):
+        if np.isnan(result):
+            return "NaN"
+        return f"{float(result):,.4f}"
+    elif isinstance(result, pd.DataFrame):
+        if result.empty:
+            return "Empty DataFrame"
+        preview = result.head(10).to_string(index=False)
+        return f"DataFrame ({len(result)} rows):\n{preview}"
+    elif isinstance(result, (list, tuple)):
+        if not result:
+            return "Empty list"
+        preview = str(result[:10])
+        if len(result) > 10:
+            preview += f"... ({len(result)} total items)"
+        return preview
+    elif result is None:
+        return "None"
+    else:
+        text = str(result)
+        if len(text) > 500:
+            text = text[:497] + "..."
+        return text
 
 
 # ── PROMPTS ─────────────────────────────────────────────────────────────
 
-PLANNER_PROMPT = """You are a data analyst working on an UNKNOWN dataset.
+PLANNER_PROMPT = """You are a data analyst. Analyze the schema and produce a JSON array of steps.
 
 Schema:
 {schema}
 
 Instructions:
-- NEVER assume column names
-- ALWAYS use column_names + sample_rows
-- If filtering values, find correct column from sample_rows
-- Use ONLY available columns
+- Use ONLY column names from schema above
+- Use df['column_name'] syntax exactly
+- For text matching, check exact values in sample_rows first
 
-Each step MUST include a "type" field. Valid types:
-- "query" - for data manipulation/queries (requires "code" field)
-- "plot" - for visualizations (requires "code" field with plotly)
-- "reason" - for reasoning/context (requires "context_keys" field)
+Step types:
+- "query": Data manipulation (requires "code" field assigning to `result`)
+- "plot": Visualization (requires "code" field assigning to `fig`)
+- "reason": Analysis (requires "context_keys" array referencing previous steps)
 
-Example steps:
-- {{"type": "query", "goal": "Count rows where status is delayed", "code": "result = df[df['status'] == 'delayed'].shape[0]"}}
-- {{"type": "plot", "goal": "Bar chart of sales by category", "code": "fig = px.bar(df.groupby('category')['sales'].sum().reset_index(), x='category', y='sales')"}}
-- {{"type": "reason", "goal": "Analyze why there's a gap", "context_keys": ["step_0", "step_1"]}}
+Valid JSON examples:
+[
+  {{"type": "query", "goal": "Count delayed rows", "code": "result = df[df['status'] == 'delayed'].shape[0]"}},
+  {{"type": "plot", "goal": "Bar chart of sales", "code": "fig = px.bar(df.groupby('category')['sales'].sum().reset_index(), x='category', y='sales')"}},
+  {{"type": "reason", "goal": "Analyze gap", "context_keys": ["step_0", "step_1"]}}
+]
 
 Rules:
-- Use df['exact_column']
-- Assign result to `result` for queries
-- Assign fig to `fig` for plots
-- SINGLE quotes only
-- STRICT JSON ONLY - no trailing commas
-- Output ONLY a JSON array of steps
+- Output ONLY the JSON array, no markdown, no explanation
+- No trailing commas
+- Use SINGLE quotes for Python strings inside "code" fields
+- DOUBLE quotes for JSON keys/values
 
-Output ONLY JSON.
+User question: {question}
+History context: {history}
 """
 
-ANSWER_PROMPT = """You MUST answer using ONLY computed results.
+ANSWER_PROMPT = """Answer using ONLY the computed results below. Do not use external knowledge.
 
 Question: {question}
 
-Results:
+Computed Results:
 {context}
 
-Rules:
-- DO NOT use external knowledge
-- DO NOT say "I don't have access"
-- If ERROR present → explain briefly
-- Otherwise answer using results
-
-Be concise.
+Guidelines:
+- If results contain error messages, explain what went wrong
+- If DataFrame shown, summarize key findings
+- If boolean result, explain the implication
+- Keep answer under 3 sentences unless detailed analysis required
 """
 
 
 # ── AGENT ───────────────────────────────────────────────────────────────
 
-def run(question, df, history):
+def sanitize_code(code):
+    """Basic safety check for generated code."""
+    dangerous = ['import os', 'import sys', '__import__', 'subprocess', 'open(', 'eval(', 'exec(', 'compile(']
+    code_lower = code.lower()
+    for d in dangerous:
+        if d in code_lower:
+            raise ValueError(f"Potentially unsafe code detected: {d}")
+    return code
+
+
+def run(question, df, history=None):
+    if df is None or df.empty:
+        return {"answer": "No data loaded. Please upload a file first.", "fig": None, "steps": []}
+    
+    history = history or []
     schema = tool_runner.get_schema(df)
     context = {}
     steps_log = []
     fig = None
+    
+    # Build history summary
+    history_str = ""
+    if history:
+        recent = history[-3:]  # Last 3 exchanges
+        history_str = "\n".join([f"{'User' if m.get('role')=='user' else 'Assistant'}: {str(m.get('content',''))[:100]}" 
+                                for m in recent])
 
-    namespace = {
+    # Fresh namespace for isolation
+    base_namespace = {
         "df": df.copy(),
         "pd": pd,
         "px": px,
         "go": go,
+        "np": np,
     }
 
     # ── PLAN ───────────────────────────────────────────────────────────
-    for attempt in range(2):
+    plan = None
+    for attempt in range(3):  # Increased retries
         try:
-            raw = llm.call(
-                PLANNER_PROMPT.format(schema=schema),
-                f"Question: {question}"
+            prompt = PLANNER_PROMPT.format(
+                schema=schema, 
+                question=question,
+                history=history_str if history_str else "None"
             )
+            raw = llm.call(prompt, "Generate analysis plan.")
             raw = extract_json(raw)
             plan = safe_json_loads(raw)
 
             if not isinstance(plan, list):
-                plan = [plan]
-
-            # ensure structure - MORE ROBUST
+                plan = [plan] if isinstance(plan, dict) else []
+            
+            # Validate plan structure
             clean_plan = []
             for step in plan:
-                if isinstance(step, dict):
-                    # If 'type' is missing, infer it from presence of 'code' or 'context_keys'
-                    if "type" not in step:
-                        if "code" in step:
-                            # Check if it's likely a plot (contains fig/plot/px/go)
-                            code_lower = step.get("code", "").lower()
-                            if any(word in code_lower for word in ["fig", "plot", "px.", "go.", "scatter", "bar", "line"]):
-                                step["type"] = "plot"
-                            else:
-                                step["type"] = "query"
-                        elif "context_keys" in step:
-                            step["type"] = "reason"
-                        else:
-                            step["type"] = "query"  # default fallback
-                    clean_plan.append(step)
-
-            if not clean_plan:
-                # If still empty, try to extract ANY valid step pattern
-                if isinstance(plan, dict) and ("code" in plan or "context_keys" in plan):
-                    if "code" in plan:
-                        plan["type"] = "query" if "plot" not in plan.get("code", "").lower() else "plot"
-                    elif "context_keys" in plan:
-                        plan["type"] = "reason"
-                    clean_plan = [plan]
-                else:
-                    raise ValueError("Invalid plan: no valid steps found")
-
-            plan = clean_plan
-            break
+                if not isinstance(step, dict):
+                    continue
+                    
+                # Infer type if missing
+                if "type" not in step:
+                    code = step.get("code", "")
+                    if "context_keys" in step:
+                        step["type"] = "reason"
+                    elif any(k in code for k in ["fig", "px.", "go.", "plot", "chart", "scatter", "bar(", "line("]):
+                        step["type"] = "plot"
+                    elif "code" in step:
+                        step["type"] = "query"
+                    else:
+                        continue
+                
+                # Validate required fields
+                if step["type"] in ["query", "plot"] and "code" not in step:
+                    continue
+                if step["type"] == "reason" and "context_keys" not in step:
+                    step["context_keys"] = []
+                    
+                clean_plan.append(step)
+            
+            if clean_plan:
+                plan = clean_plan
+                break
+            else:
+                raise ValueError("No valid steps in plan")
 
         except Exception as e:
-            if attempt == 1:
-                return {"answer": f"Planning failed: {e}", "fig": None, "steps": []}
+            if attempt == 2:
+                return {
+                    "answer": f"Unable to create analysis plan: {str(e)}. Try rephrasing your question.", 
+                    "fig": None, 
+                    "steps": [{"error": str(e), "attempt": attempt}]
+                }
+            # Brief pause before retry could be added here
 
     # ── ACT ────────────────────────────────────────────────────────────
     for i, step in enumerate(plan):
         step_key = f"step_{i}"
         step_type = step.get("type")
-        goal = step.get("goal", "")
+        goal = step.get("goal", f"Step {i}")
+        
+        # Isolated namespace copy for this step
+        step_namespace = base_namespace.copy()
+        step_namespace.update(context)  # Make previous results available
+        
+        try:
+            if step_type == "query":
+                code = step.get("code", "")
+                sanitize_code(code)
+                res = tool_runner.run_query(df, code, step_namespace)
+                
+                if not res["ok"]:
+                    steps_log.append({
+                        "step": step_key, 
+                        "type": "query", 
+                        "goal": goal, 
+                        "ok": False, 
+                        "error": res["error"]
+                    })
+                    # Continue with partial context rather than failing entirely
+                    context[step_key] = f"Error: {res['error']}"
+                else:
+                    context[step_key] = format_result_for_context(res["result"])
+                    steps_log.append({
+                        "step": step_key, 
+                        "type": "query", 
+                        "goal": goal, 
+                        "ok": True
+                    })
 
-        if step_type == "query":
-            res = tool_runner.run_query(df, step.get("code", ""), namespace)
+            elif step_type == "plot":
+                code = step.get("code", "")
+                sanitize_code(code)
+                res = tool_runner.run_plot(df, code, step_namespace)
+                
+                if res["ok"]:
+                    fig = res["fig"]
+                    context[step_key] = "Plot generated successfully"
+                    steps_log.append({
+                        "step": step_key, 
+                        "type": "plot", 
+                        "goal": goal, 
+                        "ok": True
+                    })
+                else:
+                    context[step_key] = f"Plot error: {res['error']}"
+                    steps_log.append({
+                        "step": step_key, 
+                        "type": "plot", 
+                        "goal": goal, 
+                        "ok": False, 
+                        "error": res["error"]
+                    })
 
-            if not res["ok"]:
-                return {
-                    "answer": f"Query failed: {res['error']}",
-                    "fig": None,
-                    "steps": steps_log,
-                }
+            elif step_type == "reason":
+                keys = step.get("context_keys", [])
+                relevant = {}
+                for k in keys:
+                    if k in context:
+                        relevant[k] = context[k]
+                    elif k == "step_current" or k == "current":
+                        relevant["current"] = context.get(f"step_{i-1}", "N/A")
+                
+                context[step_key] = str(relevant)[:800]
+                steps_log.append({
+                    "step": step_key, 
+                    "type": "reason", 
+                    "goal": goal
+                })
 
-            context[step_key] = str(res["result"])[:500]
-            steps_log.append({"step": step_key, "type": "query", "goal": goal, "ok": True})
-
-        elif step_type == "plot":
-            res = tool_runner.run_plot(df, step.get("code", ""), namespace)
-
-            if res["ok"]:
-                fig = res["fig"]
-                context[step_key] = "Plot generated"
-                steps_log.append({"step": step_key, "type": "plot", "goal": goal, "ok": True})
-
-        elif step_type == "reason":
-            relevant = {k: context[k] for k in step.get("context_keys", []) if k in context}
-            context[step_key] = str(relevant)
-            steps_log.append({"step": step_key, "type": "reason", "goal": goal})
+        except Exception as e:
+            steps_log.append({
+                "step": step_key, 
+                "type": step_type, 
+                "goal": goal, 
+                "ok": False, 
+                "error": str(e)
+            })
+            context[step_key] = f"Execution error: {str(e)}"
 
     # ── ANSWER ─────────────────────────────────────────────────────────
-    context_str = "\n".join([f"[{k}] {v}" for k, v in context.items()])
-
-    answer = llm.call(
-        ANSWER_PROMPT.format(question=question, context=context_str),
-        "Answer."
-    )
+    if not context:
+        return {
+            "answer": "Could not analyze the data. The question might be outside the scope of available columns.", 
+            "fig": fig, 
+            "steps": steps_log
+        }
+    
+    context_str = "\n\n".join([f"[{k}]:\n{v}" for k, v in context.items()])
+    
+    try:
+        answer = llm.call(
+            ANSWER_PROMPT.format(question=question, context=context_str),
+            "Generate final answer."
+        )
+    except Exception as e:
+        answer = f"Analysis completed but summarization failed: {str(e)}"
 
     return {"answer": answer, "fig": fig, "steps": steps_log}
