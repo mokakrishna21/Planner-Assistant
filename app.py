@@ -5,11 +5,14 @@ Run with: streamlit run app.py
 
 import streamlit as st
 import pandas as pd
+import json
 import sys
 import os
 
 sys.path.insert(0, os.path.dirname(__file__))
 import agent
+import llm
+import tools as tool_runner
 
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -101,6 +104,50 @@ if "df" not in st.session_state:
     st.session_state.df = None
 if "filename" not in st.session_state:
     st.session_state.filename = None
+if "quick_qs" not in st.session_state:
+    st.session_state.quick_qs = []
+
+
+# ── Generate data-aware quick questions ───────────────────────────────────────
+QUICK_Q_PROMPT = """You are a data analyst. Given a spreadsheet schema and sample, generate exactly 6 short,
+specific, useful questions a user might ask about THIS data.
+
+Rules:
+- Use actual column names from the schema.
+- Mix types: 1-2 aggregations, 1-2 distributions/plots, 1 anomaly/gap, 1 summary.
+- Each question must be answerable from the data alone.
+- Keep each question under 10 words.
+- Output ONLY a JSON array of 6 strings. No markdown, no explanation.
+
+Schema:
+{schema}
+"""
+
+def generate_quick_questions(df: pd.DataFrame) -> list[str]:
+    """Call LLM once to produce schema-aware quick questions. Falls back to generics on error."""
+    try:
+        schema = tool_runner.get_schema(df)
+        raw = llm.call(QUICK_Q_PROMPT.format(schema=schema), "Generate questions.")
+        raw = raw.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        questions = json.loads(raw)
+        if isinstance(questions, list) and len(questions) >= 4:
+            return questions[:6]
+    except Exception:
+        pass
+    # Fallback generics
+    return [
+        "Summarize this dataset",
+        "Show distribution of key columns",
+        "What are the top 5 rows by value?",
+        "Identify any gaps or anomalies",
+        "Plot the main numeric columns",
+        "What columns have missing values?",
+    ]
+
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -121,7 +168,8 @@ with st.sidebar:
                 df = pd.read_excel(uploaded)
             st.session_state.df = df
             st.session_state.filename = uploaded.name
-            st.session_state.messages = []  # reset chat on new file
+            st.session_state.messages = []
+            st.session_state.quick_qs = []  # reset so they regenerate for new file
             st.success(f"Loaded {len(df):,} rows × {len(df.columns)} cols")
         except Exception as e:
             st.error(f"Load failed: {e}")
@@ -162,14 +210,11 @@ with st.expander("Preview data", expanded=False):
 st.markdown("---")
 
 # ── Chat history ───────────────────────────────────────────────────────────────
-chat_container = st.container()
-
-with chat_container:
+with st.container():
     for msg in st.session_state.messages:
         if msg["role"] == "user":
             st.markdown(f'<div class="user-msg">🧑 {msg["content"]}</div>', unsafe_allow_html=True)
         else:
-            # Split out insight line for special rendering
             content = msg["content"]
             insight = ""
             if "**Insight:**" in content:
@@ -181,7 +226,6 @@ with chat_container:
             if insight:
                 st.markdown(f'<div class="insight-box">💡 <strong>Insight:</strong> {insight}</div>', unsafe_allow_html=True)
 
-            # Show agent steps taken
             if "steps" in msg and msg["steps"]:
                 step_html = "".join([
                     f'<span class="step-badge">{"✓" if s.get("ok", True) else "✗"} {s["type"]}: {s.get("goal", s.get("reason", "Action"))[:40]}</span>'
@@ -189,38 +233,34 @@ with chat_container:
                 ])
                 st.markdown(f"<div style='margin:4px 0'>{step_html}</div>", unsafe_allow_html=True)
 
-            # Render chart if any
             if "fig" in msg and msg["fig"] is not None:
-                st.plotly_chart(msg["fig"], width="stretch")
+                st.plotly_chart(msg["fig"], use_container_width=True)
 
 # ── Input ──────────────────────────────────────────────────────────────────────
 st.markdown("---")
 
-# Quick question chips
+# Generate quick questions once per file (lazy, cached in session_state)
+if not st.session_state.quick_qs:
+    with st.spinner("Generating suggestions..."):
+        st.session_state.quick_qs = generate_quick_questions(st.session_state.df)
+
+# Quick question chips — data-aware
 question = None
-quick_qs = [
-    "Summarize this dataset",
-    "Show distribution of key columns",
-    "What are the top 5 rows by value?",
-    "Identify any gaps or anomalies",
-]
-with st.expander("Quick questions", expanded=False):
+with st.expander("Suggested questions", expanded=True):
     cols = st.columns(2)
-    for i, q in enumerate(quick_qs):
+    for i, q in enumerate(st.session_state.quick_qs):
         if cols[i % 2].button(q, key=f"quick_{i}"):
             question = q
 
-# Chat input must be at top level (not inside columns/expander/form)
+# Chat input
 chat_question = st.chat_input("Ask anything about your data...")
 if chat_question:
     question = chat_question
 
 # ── Process question ───────────────────────────────────────────────────────────
 if question:
-    # Add user message
     st.session_state.messages.append({"role": "user", "content": question})
 
-    # Build history for follow-up context (last 6 turns)
     history = [
         {"role": m["role"], "content": m["content"]}
         for m in st.session_state.messages[-6:]
@@ -230,7 +270,6 @@ if question:
     with st.spinner("Thinking..."):
         result = agent.run(question, st.session_state.df, history)
 
-    # Store response with metadata
     bot_msg = {
         "role": "assistant",
         "content": result["answer"],

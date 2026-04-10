@@ -6,6 +6,7 @@ Each tool takes (df, params) and returns a result dict.
 import json
 import traceback
 import pandas as pd
+import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 
@@ -25,15 +26,19 @@ def run_query(df: pd.DataFrame, code: str, namespace: dict) -> dict:
     Execute pandas code against df.
     The code must assign result to a variable named `result`.
     Returns {"ok": True, "result": ..., "type": "dataframe"|"scalar"|"string"}
+    
+    NOTE: Clears `result` from namespace before exec to prevent stale values
+    leaking from previous steps in the same agent run.
     """
     try:
+        namespace.pop("result", None)  # prevent stale result leak between steps
         exec(code, namespace)
         result = namespace.get("result", None)
         if result is None:
             return {"ok": False, "error": "Code did not assign to `result`"}
         if isinstance(result, pd.DataFrame):
             return {"ok": True, "result": result, "type": "dataframe"}
-        elif isinstance(result, (int, float)):
+        elif isinstance(result, (int, float, np.number)):
             return {"ok": True, "result": result, "type": "scalar"}
         else:
             return {"ok": True, "result": str(result), "type": "string"}
@@ -48,6 +53,7 @@ def run_plot(df: pd.DataFrame, code: str, namespace: dict):
     Returns {"ok": True, "fig": fig} or {"ok": False, "error": ...}
     """
     try:
+        namespace.pop("fig", None)  # same pattern: clear stale fig
         exec(code, namespace)
         fig = namespace.get("fig", None)
         if fig is None:

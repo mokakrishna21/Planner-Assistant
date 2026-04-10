@@ -108,10 +108,6 @@ def run(question: str, df, history: list) -> dict:
             plan_raw = plan_raw.split("```")[1]
             if plan_raw.startswith("json"):
                 plan_raw = plan_raw[4:]
-        
-        # Sanitize common JSON control character issues from smaller models
-        plan_raw = plan_raw.replace("\n", " ").replace("\r", " ").strip()
-        
         plan = json.loads(plan_raw)
         if not isinstance(plan, list):
             plan = [plan]
@@ -148,8 +144,7 @@ def run(question: str, df, history: list) -> dict:
                             ),
                             "Replan."
                         )
-                        replan_raw = replan_raw.strip().replace("\n", " ").replace("\r", " ")
-                        new_plan = json.loads(replan_raw)
+                        new_plan = json.loads(replan_raw.strip())
                         plan = new_plan  # replace remaining plan
                         steps_log.append({"step": step_key, "type": "replan", "reason": val["reason"]})
                         continue
