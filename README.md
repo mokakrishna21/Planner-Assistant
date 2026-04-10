@@ -125,7 +125,7 @@ README.md        — This file
 
 | Component | Choice | Why |
 |---|---|---|
-| **LLM** | Groq + Llama 3.3 70B | Fast inference, open-source model, free tier |
+| **LLM** | Groq + Llama 3.1 8B | Fast inference, open-source model, free tier |
 | **UI** | Streamlit | Rapid prototyping, built-in data widgets |
 | **Data** | Pandas | Industry standard, handles CSV/Excel |
 | **Charts** | Plotly | Interactive, auto-renders in Streamlit |
