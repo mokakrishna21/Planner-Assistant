@@ -14,6 +14,9 @@ task A and task B" — the kind that single-prompt approaches fail at.
 import json
 import llm
 import tools as tool_runner
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 
 # ── Prompts ────────────────────────────────────────────────────────────────────
 
@@ -84,6 +87,14 @@ def run(question: str, df, history: list) -> dict:
     steps_log = []
     context = {}
     fig = None
+    
+    # Execution namespace: shared across all steps
+    persistent_ns = {
+        "df": df.copy(),
+        "pd": pd,
+        "px": px,
+        "go": go
+    }
 
     # ── 1. PLAN ──────────────────────────────────────────────────────────────
     try:
@@ -110,7 +121,7 @@ def run(question: str, df, history: list) -> dict:
         goal = step.get("goal", "")
 
         if step_type == "query":
-            res = tool_runner.run_query(df, step["code"])
+            res = tool_runner.run_query(df, step["code"], persistent_ns)
             if res["ok"]:
                 result_val = res["result"]
                 # Validate intermediate result
@@ -147,7 +158,7 @@ def run(question: str, df, history: list) -> dict:
                 steps_log.append({"step": step_key, "type": "query", "goal": goal, "ok": False, "error": res["error"]})
 
         elif step_type == "plot":
-            res = tool_runner.run_plot(df, step["code"])
+            res = tool_runner.run_plot(df, step["code"], persistent_ns)
             if res["ok"]:
                 fig = res["fig"]
                 context[step_key] = "Plot generated successfully."

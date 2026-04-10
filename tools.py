@@ -20,16 +20,15 @@ def get_schema(df: pd.DataFrame) -> str:
     return json.dumps({"columns": schema, "sample_rows": sample, "numeric_stats": stats}, default=str)
 
 
-def run_query(df: pd.DataFrame, code: str) -> dict:
+def run_query(df: pd.DataFrame, code: str, namespace: dict) -> dict:
     """
     Execute pandas code against df.
     The code must assign result to a variable named `result`.
     Returns {"ok": True, "result": ..., "type": "dataframe"|"scalar"|"string"}
     """
-    local_ns = {"df": df.copy(), "pd": pd}
     try:
-        exec(code, local_ns)
-        result = local_ns.get("result", None)
+        exec(code, namespace)
+        result = namespace.get("result", None)
         if result is None:
             return {"ok": False, "error": "Code did not assign to `result`"}
         if isinstance(result, pd.DataFrame):
@@ -42,16 +41,15 @@ def run_query(df: pd.DataFrame, code: str) -> dict:
         return {"ok": False, "error": str(e), "traceback": traceback.format_exc()}
 
 
-def run_plot(df: pd.DataFrame, code: str):
+def run_plot(df: pd.DataFrame, code: str, namespace: dict):
     """
     Execute plotly code against df.
     The code must assign a plotly figure to `fig`.
     Returns {"ok": True, "fig": fig} or {"ok": False, "error": ...}
     """
-    local_ns = {"df": df.copy(), "pd": pd, "px": px, "go": go}
     try:
-        exec(code, local_ns)
-        fig = local_ns.get("fig", None)
+        exec(code, namespace)
+        fig = namespace.get("fig", None)
         if fig is None:
             return {"ok": False, "error": "Code did not assign to `fig`"}
         # Apply clean styling

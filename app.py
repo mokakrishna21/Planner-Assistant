@@ -113,7 +113,7 @@ with st.sidebar:
         help="CSV or Excel file"
     )
 
-    if uploaded:
+    if uploaded and uploaded.name != st.session_state.filename:
         try:
             if uploaded.name.endswith(".csv"):
                 df = pd.read_csv(uploaded)
@@ -196,13 +196,8 @@ with chat_container:
 # ── Input ──────────────────────────────────────────────────────────────────────
 st.markdown("---")
 
-# Suggested questions based on data
-col1, col2 = st.columns([3, 1])
-
-with col1:
-    question = st.chat_input("Ask anything about your data...")
-
 # Quick question chips
+question = None
 quick_qs = [
     "Summarize this dataset",
     "Show distribution of key columns",
@@ -214,6 +209,11 @@ with st.expander("Quick questions", expanded=False):
     for i, q in enumerate(quick_qs):
         if cols[i % 2].button(q, key=f"quick_{i}"):
             question = q
+
+# Chat input must be at top level (not inside columns/expander/form)
+chat_question = st.chat_input("Ask anything about your data...")
+if chat_question:
+    question = chat_question
 
 # ── Process question ───────────────────────────────────────────────────────────
 if question:
