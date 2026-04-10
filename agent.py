@@ -30,16 +30,23 @@ Instructions:
 - If filtering values, find correct column from sample_rows
 - Use ONLY available columns
 
-Each step:
-- {"type": "query", "goal": "...", "code": "..."}
-- {"type": "plot", "goal": "...", "code": "..."}
-- {"type": "reason", "goal": "...", "context_keys": [...]}
+Each step MUST include a "type" field. Valid types:
+- "query" - for data manipulation/queries (requires "code" field)
+- "plot" - for visualizations (requires "code" field with plotly)
+- "reason" - for reasoning/context (requires "context_keys" field)
+
+Example steps:
+- {"type": "query", "goal": "Count rows where status is delayed", "code": "result = df[df['status'] == 'delayed'].shape[0]"}
+- {"type": "plot", "goal": "Bar chart of sales by category", "code": "fig = px.bar(df.groupby('category')['sales'].sum().reset_index(), x='category', y='sales')"}
+- {"type": "reason", "goal": "Analyze why there's a gap", "context_keys": ["step_0", "step_1"]}
 
 Rules:
 - Use df['exact_column']
-- Assign result to `result`
+- Assign result to `result` for queries
+- Assign fig to `fig` for plots
 - SINGLE quotes only
-- STRICT JSON ONLY
+- STRICT JSON ONLY - no trailing commas
+- Output ONLY a JSON array of steps
 
 Output ONLY JSON.
 """
@@ -53,7 +60,7 @@ Results:
 
 Rules:
 - DO NOT use external knowledge
-- DO NOT say "I don’t have access"
+- DO NOT say "I don't have access"
 - If ERROR present → explain briefly
 - Otherwise answer using results
 
@@ -89,16 +96,35 @@ def run(question, df, history):
             if not isinstance(plan, list):
                 plan = [plan]
 
-            # ensure structure
+            # ensure structure - MORE ROBUST
             clean_plan = []
             for step in plan:
                 if isinstance(step, dict):
+                    # If 'type' is missing, infer it from presence of 'code' or 'context_keys'
                     if "type" not in step:
-                        step["type"] = "query"
+                        if "code" in step:
+                            # Check if it's likely a plot (contains fig/plot/px/go)
+                            code_lower = step.get("code", "").lower()
+                            if any(word in code_lower for word in ["fig", "plot", "px.", "go.", "scatter", "bar", "line"]):
+                                step["type"] = "plot"
+                            else:
+                                step["type"] = "query"
+                        elif "context_keys" in step:
+                            step["type"] = "reason"
+                        else:
+                            step["type"] = "query"  # default fallback
                     clean_plan.append(step)
 
             if not clean_plan:
-                raise ValueError("Invalid plan")
+                # If still empty, try to extract ANY valid step pattern
+                if isinstance(plan, dict) and ("code" in plan or "context_keys" in plan):
+                    if "code" in plan:
+                        plan["type"] = "query" if "plot" not in plan.get("code", "").lower() else "plot"
+                    elif "context_keys" in plan:
+                        plan["type"] = "reason"
+                    clean_plan = [plan]
+                else:
+                    raise ValueError("Invalid plan: no valid steps found")
 
             plan = clean_plan
             break
