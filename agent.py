@@ -6,7 +6,6 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
-import textwrap
 
 
 def safe_json_loads(s):
@@ -14,17 +13,13 @@ def safe_json_loads(s):
     if not s or not isinstance(s, str):
         raise ValueError("Empty or non-string input")
     
-    # Remove control chars
     s = re.sub(r"[\x00-\x1F\x7F]", "", s)
-    # Remove trailing commas before ] or }
     s = re.sub(r",\s*(\]|\})", r"\1", s)
-    # Fix single quotes to double quotes (common LLM mistake)
     s = re.sub(r"(?<!\\)'", '"', s)
     
     try:
         return json.loads(s)
-    except json.JSONDecodeError as e:
-        # Try to extract just the array/object if wrapped in markdown
+    except json.JSONDecodeError:
         s = re.sub(r'^```json\s*', '', s)
         s = re.sub(r'^```\s*', '', s)
         s = re.sub(r'\s*```$', '', s)
@@ -32,18 +27,16 @@ def safe_json_loads(s):
 
 
 def extract_json(s):
-    """Extract JSON array or object from text, handling nested structures."""
+    """Extract JSON array or object from text."""
     if not s:
         return "[]"
     
-    # Try to find outermost array or object
     s = s.strip()
     if s.startswith('[') and s.endswith(']'):
         return s
     if s.startswith('{') and s.endswith('}'):
         return s
     
-    # Look for JSON blocks
     match = re.search(r'(\[[\s\S]*\]|\{[\s\S]*\})', s)
     if match:
         return match.group(0)
@@ -77,12 +70,8 @@ def format_result_for_context(result):
         return "None"
     else:
         text = str(result)
-        if len(text) > 500:
-            text = text[:497] + "..."
-        return text
+        return text[:497] + "..." if len(text) > 500 else text
 
-
-# ── PROMPTS ─────────────────────────────────────────────────────────────
 
 PLANNER_PROMPT = """You are a data analyst. Analyze the schema and produce a JSON array of steps.
 
@@ -131,8 +120,6 @@ Guidelines:
 """
 
 
-# ── AGENT ───────────────────────────────────────────────────────────────
-
 def sanitize_code(code):
     """Basic safety check for generated code."""
     dangerous = ['import os', 'import sys', '__import__', 'subprocess', 'open(', 'eval(', 'exec(', 'compile(']
@@ -153,14 +140,12 @@ def run(question, df, history=None):
     steps_log = []
     fig = None
     
-    # Build history summary
     history_str = ""
     if history:
-        recent = history[-3:]  # Last 3 exchanges
+        recent = history[-3:]
         history_str = "\n".join([f"{'User' if m.get('role')=='user' else 'Assistant'}: {str(m.get('content',''))[:100]}" 
                                 for m in recent])
 
-    # Fresh namespace for isolation
     base_namespace = {
         "df": df.copy(),
         "pd": pd,
@@ -171,7 +156,7 @@ def run(question, df, history=None):
 
     # ── PLAN ───────────────────────────────────────────────────────────
     plan = None
-    for attempt in range(3):  # Increased retries
+    for attempt in range(3):
         try:
             prompt = PLANNER_PROMPT.format(
                 schema=schema, 
@@ -185,13 +170,11 @@ def run(question, df, history=None):
             if not isinstance(plan, list):
                 plan = [plan] if isinstance(plan, dict) else []
             
-            # Validate plan structure
             clean_plan = []
             for step in plan:
                 if not isinstance(step, dict):
                     continue
                     
-                # Infer type if missing
                 if "type" not in step:
                     code = step.get("code", "")
                     if "context_keys" in step:
@@ -201,9 +184,8 @@ def run(question, df, history=None):
                     elif "code" in step:
                         step["type"] = "query"
                     else:
-                        continue
+                        step["type"] = "unknown"
                 
-                # Validate required fields
                 if step["type"] in ["query", "plot"] and "code" not in step:
                     continue
                 if step["type"] == "reason" and "context_keys" not in step:
@@ -222,19 +204,17 @@ def run(question, df, history=None):
                 return {
                     "answer": f"Unable to create analysis plan: {str(e)}. Try rephrasing your question.", 
                     "fig": None, 
-                    "steps": [{"error": str(e), "attempt": attempt}]
+                    "steps": [{"type": "error", "step": "planning", "error": str(e), "ok": False}]
                 }
-            # Brief pause before retry could be added here
 
     # ── ACT ────────────────────────────────────────────────────────────
     for i, step in enumerate(plan):
         step_key = f"step_{i}"
-        step_type = step.get("type")
+        step_type = step.get("type", "unknown")
         goal = step.get("goal", f"Step {i}")
         
-        # Isolated namespace copy for this step
         step_namespace = base_namespace.copy()
-        step_namespace.update(context)  # Make previous results available
+        step_namespace.update(context)
         
         try:
             if step_type == "query":
@@ -250,7 +230,6 @@ def run(question, df, history=None):
                         "ok": False, 
                         "error": res["error"]
                     })
-                    # Continue with partial context rather than failing entirely
                     context[step_key] = f"Error: {res['error']}"
                 else:
                     context[step_key] = format_result_for_context(res["result"])
@@ -287,24 +266,27 @@ def run(question, df, history=None):
 
             elif step_type == "reason":
                 keys = step.get("context_keys", [])
-                relevant = {}
-                for k in keys:
-                    if k in context:
-                        relevant[k] = context[k]
-                    elif k == "step_current" or k == "current":
-                        relevant["current"] = context.get(f"step_{i-1}", "N/A")
-                
+                relevant = {k: context.get(k, "N/A") for k in keys}
                 context[step_key] = str(relevant)[:800]
                 steps_log.append({
                     "step": step_key, 
                     "type": "reason", 
-                    "goal": goal
+                    "goal": goal,
+                    "ok": True
+                })
+            else:
+                steps_log.append({
+                    "step": step_key,
+                    "type": "unknown",
+                    "goal": goal,
+                    "ok": False,
+                    "error": f"Unknown step type: {step_type}"
                 })
 
         except Exception as e:
             steps_log.append({
                 "step": step_key, 
-                "type": step_type, 
+                "type": step_type if step_type else "error", 
                 "goal": goal, 
                 "ok": False, 
                 "error": str(e)

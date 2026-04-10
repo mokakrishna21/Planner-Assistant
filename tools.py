@@ -31,7 +31,6 @@ def convert_to_serializable(obj):
     if isinstance(obj, pd.Timestamp):
         return obj.isoformat()
     if isinstance(obj, pd.DataFrame):
-        # Convert DataFrame to dict records for JSON safety
         return obj.head(50).to_dict(orient='records')
     return obj
 
@@ -42,7 +41,6 @@ def get_schema(df: pd.DataFrame) -> str:
         if df is None:
             return json.dumps({"error": "No DataFrame provided"})
         
-        # Handle empty DataFrame
         if df.empty:
             return json.dumps({
                 "columns": list(df.columns),
@@ -51,7 +49,6 @@ def get_schema(df: pd.DataFrame) -> str:
                 "note": "DataFrame is empty"
             })
         
-        # Safe dtype conversion
         columns = {}
         for col, dtype in df.dtypes.items():
             try:
@@ -59,21 +56,18 @@ def get_schema(df: pd.DataFrame) -> str:
             except:
                 columns[col] = "unknown"
         
-        # Safe sample rows (handle non-serializable values)
         sample_rows = []
         for idx, row in df.head(5).iterrows():
             clean_row = {}
             for col in df.columns:
                 val = row[col]
                 try:
-                    # Try to serialize, fall back to string representation
                     json.dumps(val, default=str)
                     clean_row[col] = val
                 except:
                     clean_row[col] = str(val)
             sample_rows.append(clean_row)
         
-        # Numeric stats with error handling
         numeric_stats = {}
         for col in df.select_dtypes(include=[np.number]).columns:
             try:
@@ -109,25 +103,20 @@ def get_schema(df: pd.DataFrame) -> str:
 def run_query(df, code, namespace):
     """Execute query code with comprehensive error handling."""
     try:
-        # Ensure clean state
         namespace.pop("result", None)
         namespace.pop("__result", None)
         
-        # Validate code isn't empty
         if not code or not code.strip():
             return {"ok": False, "error": "Empty code provided"}
         
-        # Execute with timeout protection (implicit via Streamlit/Groq timeouts)
         exec(code, namespace)
         result = namespace.get("result")
         
         if result is None:
             return {"ok": False, "error": "No result variable assigned. Use: result = ..."}
         
-        # Convert to serializable form
         result = convert_to_serializable(result)
         
-        # Size limits for display
         if isinstance(result, list) and len(result) > 1000:
             result = result[:1000] + [f"... ({len(result)-1000} more items)"]
         if isinstance(result, dict) and len(str(result)) > 10000:
@@ -149,15 +138,12 @@ def run_query(df, code, namespace):
         }
     except Exception as e:
         error_msg = str(e)
-        tb = traceback.format_exc()
-        
-        # Sanitize error message (don't expose full paths)
         safe_error = error_msg.split('\n')[-1] if '\n' in error_msg else error_msg
         
         return {
             "ok": False, 
             "error": safe_error,
-            "traceback": tb if "development" in str(e) else None  # Only in debug
+            "traceback": traceback.format_exc()
         }
 
 
@@ -175,11 +161,9 @@ def run_plot(df, code, namespace):
         if fig is None:
             return {"ok": False, "error": "No figure assigned. Use: fig = px... or fig = go.Figure()"}
         
-        # Validate it's a plotly figure
         if not hasattr(fig, 'update_layout'):
             return {"ok": False, "error": "Result is not a Plotly figure"}
         
-        # Clean styling
         fig.update_layout(
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",

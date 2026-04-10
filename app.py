@@ -228,7 +228,7 @@ with st.container():
 
             if "steps" in msg and msg["steps"]:
                 step_html = "".join([
-                    f'<span class="step-badge">{"✓" if s.get("ok", True) else "✗"} {s["type"]}: {s.get("goal", s.get("reason", "Action"))[:40]}</span>'
+                    f'<span class="step-badge">{"✓" if s.get("ok", True) else "✗"} {s.get("type", "step")}: {s.get("goal", s.get("reason", "Action"))[:40]}</span>'
                     for s in msg["steps"]
                 ])
                 st.markdown(f"<div style='margin:4px 0'>{step_html}</div>", unsafe_allow_html=True)
