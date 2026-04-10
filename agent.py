@@ -9,12 +9,10 @@ import plotly.graph_objects as go
 # ── Helpers ─────────────────────────────────────────────────────────────
 
 def safe_json_loads(s: str):
-    """Remove control characters and safely parse JSON"""
     s = re.sub(r"[\x00-\x1F\x7F]", "", s)
     return json.loads(s)
 
 def extract_json(s: str):
-    """Extract JSON block from LLM output"""
     match = re.search(r'(\[.*\]|\{.*\})', s, re.DOTALL)
     if match:
         return match.group(0)
@@ -24,19 +22,19 @@ def extract_json(s: str):
 
 PLANNER_PROMPT = """You are a data analyst planning how to answer a question about a spreadsheet.
 
-Return a JSON plan (list of steps).
+Return a JSON list of steps.
 
-Each step:
-- {"type": "query", "goal": "...", "code": "..."}
-- {"type": "plot", "goal": "...", "code": "..."}
-- {"type": "reason", "goal": "...", "context_keys": ["step_0"]}
+Each step MUST include:
+- "type": one of ["query", "plot", "reason"]
+- "goal": short description
+- "code": required for query/plot
 
 Rules:
 - Use ONLY schema columns
 - Assign output to `result` or `fig`
 - Use SINGLE quotes inside code
-- NO line breaks inside JSON strings
-- Output STRICT VALID JSON
+- NO line breaks in strings
+- STRICT VALID JSON ONLY
 - No markdown, no explanation
 
 Schema:
@@ -72,7 +70,9 @@ def run(question: str, df, history: list) -> dict:
         "go": go
     }
 
-    # ── PLAN (with retry) ───────────────────────────────────────────────
+    # ── PLAN (robust) ───────────────────────────────────────────────────
+    plan = None
+
     for attempt in range(2):
         try:
             raw = llm.call(
@@ -80,12 +80,25 @@ def run(question: str, df, history: list) -> dict:
                 f"Question: {question}"
             )
             raw = extract_json(raw.strip())
-            plan = safe_json_loads(raw)
+            parsed = safe_json_loads(raw)
 
-            if not isinstance(plan, list):
-                plan = [plan]
+            if not isinstance(parsed, list):
+                parsed = [parsed]
 
+            # ✅ FIX: ensure valid structure
+            valid_plan = []
+            for step in parsed:
+                if isinstance(step, dict):
+                    if "type" not in step:
+                        step["type"] = "query"  # fallback
+                    valid_plan.append(step)
+
+            if not valid_plan:
+                raise ValueError("Empty or invalid plan")
+
+            plan = valid_plan
             break
+
         except Exception as e:
             if attempt == 1:
                 return {
@@ -97,11 +110,22 @@ def run(question: str, df, history: list) -> dict:
     # ── ACT ─────────────────────────────────────────────────────────────
     for i, step in enumerate(plan):
         step_key = f"step_{i}"
-        step_type = step.get("type")
+
+        # ✅ defensive check
+        if not isinstance(step, dict) or "type" not in step:
+            steps_log.append({
+                "step": step_key,
+                "type": "error",
+                "goal": "Invalid step",
+                "ok": False
+            })
+            continue
+
+        step_type = step["type"]
         goal = step.get("goal", "")
 
         if step_type == "query":
-            res = tool_runner.run_query(df, step["code"], namespace)
+            res = tool_runner.run_query(df, step.get("code", ""), namespace)
 
             if res["ok"]:
                 context[step_key] = str(res["result"])[:500]
@@ -111,7 +135,7 @@ def run(question: str, df, history: list) -> dict:
                 steps_log.append({"step": step_key, "type": "query", "goal": goal, "ok": False})
 
         elif step_type == "plot":
-            res = tool_runner.run_plot(df, step["code"], namespace)
+            res = tool_runner.run_plot(df, step.get("code", ""), namespace)
 
             if res["ok"]:
                 fig = res["fig"]
@@ -122,7 +146,11 @@ def run(question: str, df, history: list) -> dict:
                 steps_log.append({"step": step_key, "type": "plot", "goal": goal, "ok": False})
 
         elif step_type == "reason":
-            relevant = {k: context[k] for k in step.get("context_keys", []) if k in context}
+            relevant = {
+                k: context[k]
+                for k in step.get("context_keys", [])
+                if k in context
+            }
             context[step_key] = str(relevant)
             steps_log.append({"step": step_key, "type": "reason", "goal": goal})
 

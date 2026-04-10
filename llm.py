@@ -12,7 +12,7 @@ def call(system_prompt: str, user_message: str, max_tokens: int = 1500) -> str:
     response = client.chat.completions.create(
         model=MODEL,
         max_tokens=max_tokens,
-        temperature=0,  # ✅ critical fix
+        temperature=0,  # 🔥 critical
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},
