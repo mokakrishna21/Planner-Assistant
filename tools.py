@@ -1,9 +1,3 @@
-"""
-tools.py — Atomic operations the agent can invoke.
-Each tool takes (df, params) and returns a result dict.
-"""
-
-import json
 import traceback
 import pandas as pd
 import numpy as np
@@ -12,59 +6,55 @@ import plotly.graph_objects as go
 
 
 def get_schema(df: pd.DataFrame) -> str:
-    """Return schema + sample as a compact string for LLM context."""
     schema = {col: str(dtype) for col, dtype in df.dtypes.items()}
     sample = df.head(3).to_dict(orient="records")
+
     stats = {}
     for col in df.select_dtypes(include="number").columns:
-        stats[col] = {"min": df[col].min(), "max": df[col].max(), "mean": round(df[col].mean(), 2)}
-    return json.dumps({"columns": schema, "sample_rows": sample, "numeric_stats": stats}, default=str)
+        stats[col] = {
+            "min": df[col].min(),
+            "max": df[col].max(),
+            "mean": round(df[col].mean(), 2),
+        }
+
+    return str({"columns": schema, "sample_rows": sample, "numeric_stats": stats})
 
 
-def run_query(df: pd.DataFrame, code: str, namespace: dict) -> dict:
-    """
-    Execute pandas code against df.
-    The code must assign result to a variable named `result`.
-    Returns {"ok": True, "result": ..., "type": "dataframe"|"scalar"|"string"}
-    
-    NOTE: Clears `result` from namespace before exec to prevent stale values
-    leaking from previous steps in the same agent run.
-    """
+def run_query(df, code, namespace):
     try:
-        namespace.pop("result", None)  # prevent stale result leak between steps
+        namespace.pop("result", None)
         exec(code, namespace)
-        result = namespace.get("result", None)
+        result = namespace.get("result")
+
         if result is None:
-            return {"ok": False, "error": "Code did not assign to `result`"}
+            return {"ok": False, "error": "No result"}
+
         if isinstance(result, pd.DataFrame):
-            return {"ok": True, "result": result, "type": "dataframe"}
-        elif isinstance(result, (int, float, np.number)):
-            return {"ok": True, "result": result, "type": "scalar"}
-        else:
-            return {"ok": True, "result": str(result), "type": "string"}
+            return {"ok": True, "result": result.head(50)}
+
+        return {"ok": True, "result": result}
+
     except Exception as e:
         return {"ok": False, "error": str(e), "traceback": traceback.format_exc()}
 
 
-def run_plot(df: pd.DataFrame, code: str, namespace: dict):
-    """
-    Execute plotly code against df.
-    The code must assign a plotly figure to `fig`.
-    Returns {"ok": True, "fig": fig} or {"ok": False, "error": ...}
-    """
+def run_plot(df, code, namespace):
     try:
-        namespace.pop("fig", None)  # same pattern: clear stale fig
+        namespace.pop("fig", None)
         exec(code, namespace)
-        fig = namespace.get("fig", None)
+        fig = namespace.get("fig")
+
         if fig is None:
-            return {"ok": False, "error": "Code did not assign to `fig`"}
-        # Apply clean styling
+            return {"ok": False, "error": "No fig"}
+
         fig.update_layout(
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
             font=dict(family="monospace", size=12),
             margin=dict(l=20, r=20, t=40, b=20),
         )
+
         return {"ok": True, "fig": fig}
+
     except Exception as e:
         return {"ok": False, "error": str(e)}
