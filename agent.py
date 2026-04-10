@@ -1,5 +1,6 @@
 import json
 import re
+import ast
 import llm
 import tools as tool_runner
 import pandas as pd
@@ -13,31 +14,81 @@ def safe_json_loads(s):
     if not s or not isinstance(s, str):
         raise ValueError("Empty or non-string input")
     
+    # Remove control chars
     s = re.sub(r"[\x00-\x1F\x7F]", "", s)
-    s = re.sub(r",\s*(\]|\})", r"\1", s)
-    s = re.sub(r"(?<!\\)'", '"', s)
+    original = s.strip()
     
+    # Try 1: Raw parse
     try:
-        return json.loads(s)
+        return json.loads(original)
     except json.JSONDecodeError:
-        s = re.sub(r'^```json\s*', '', s)
-        s = re.sub(r'^```\s*', '', s)
-        s = re.sub(r'\s*```$', '', s)
-        return json.loads(s)
+        pass
+    
+    # Try 2: Remove markdown fences
+    s_clean = re.sub(r'^```json\s*', '', original)
+    s_clean = re.sub(r'^```\s*', '', s_clean)
+    s_clean = re.sub(r'\s*```$', '', s_clean)
+    if s_clean != original:
+        try:
+            return json.loads(s_clean)
+        except json.JSONDecodeError:
+            pass
+    
+    # Try 3: Fix trailing commas
+    s_clean = re.sub(r",\s*(\]|\})", r"\1", s_clean)
+    try:
+        return json.loads(s_clean)
+    except json.JSONDecodeError:
+        pass
+    
+    # Try 4: If it looks like Python dict/list literal, use ast.literal_eval
+    # This handles cases where LLM uses single quotes for JSON keys
+    if s_clean.strip().startswith(('{', '[')):
+        try:
+            return ast.literal_eval(s_clean)
+        except (ValueError, SyntaxError):
+            pass
+    
+    # Try 5: Brute force - replace all single quotes with double quotes
+    # This is risky but catches some edge cases
+    try:
+        return json.loads(s_clean.replace("'", '"'))
+    except json.JSONDecodeError:
+        pass
+    
+    raise json.JSONDecodeError(f"Could not parse JSON: {original[:100]}...", original, 0)
 
 
 def extract_json(s):
-    """Extract JSON array or object from text."""
+    """Extract JSON array or object from text, handling nested structures."""
     if not s:
         return "[]"
     
     s = s.strip()
-    if s.startswith('[') and s.endswith(']'):
-        return s
-    if s.startswith('{') and s.endswith('}'):
+    
+    # Direct match for clean JSON
+    if (s.startswith('[') and s.endswith(']')) or (s.startswith('{') and s.endswith('}')):
         return s
     
-    match = re.search(r'(\[[\s\S]*\]|\{[\s\S]*\})', s)
+    # Find outermost array or object
+    # Look for balanced brackets
+    for char, close_char in [('[', ']'), ('{', '}')]:
+        start = s.find(char)
+        if start == -1:
+            continue
+        
+        # Find matching closing bracket
+        count = 0
+        for i in range(start, len(s)):
+            if s[i] == char:
+                count += 1
+            elif s[i] == close_char:
+                count -= 1
+                if count == 0:
+                    return s[start:i+1]
+    
+    # Fallback to regex (less reliable for nested structures)
+    match = re.search(r'(\[[\s\S]*?\]|\{[\s\S]*?\})', s)
     if match:
         return match.group(0)
     
@@ -73,22 +124,24 @@ def format_result_for_context(result):
         return text[:497] + "..." if len(text) > 500 else text
 
 
-PLANNER_PROMPT = """You are a data analyst. Analyze the schema and produce a JSON array of steps.
+PLANNER_PROMPT = """You are a data analyst. Analyze the schema and produce a valid JSON array of steps.
 
 Schema:
 {schema}
 
 Instructions:
 - Use ONLY column names from schema above
-- Use df['column_name'] syntax exactly
+- Use df['column_name'] syntax exactly (with single quotes inside the code string)
 - For text matching, check exact values in sample_rows first
+
+CRITICAL: Output must be valid JSON with double quotes for keys and string values.
 
 Step types:
 - "query": Data manipulation (requires "code" field assigning to `result`)
 - "plot": Visualization (requires "code" field assigning to `fig`)
 - "reason": Analysis (requires "context_keys" array referencing previous steps)
 
-Valid JSON examples:
+Example output format:
 [
   {{"type": "query", "goal": "Count delayed rows", "code": "result = df[df['status'] == 'delayed'].shape[0]"}},
   {{"type": "plot", "goal": "Bar chart of sales", "code": "fig = px.bar(df.groupby('category')['sales'].sum().reset_index(), x='category', y='sales')"}},
@@ -96,10 +149,11 @@ Valid JSON examples:
 ]
 
 Rules:
-- Output ONLY the JSON array, no markdown, no explanation
-- No trailing commas
-- Use SINGLE quotes for Python strings inside "code" fields
-- DOUBLE quotes for JSON keys/values
+- Output ONLY the JSON array, no markdown, no explanation text
+- Use double quotes " for all JSON keys and string values
+- Inside the "code" strings, use single quotes for Python (e.g., df['column'])
+- No trailing commas after the last item in arrays/objects
+- Ensure all brackets and braces are properly closed
 
 User question: {question}
 History context: {history}
@@ -122,7 +176,9 @@ Guidelines:
 
 def sanitize_code(code):
     """Basic safety check for generated code."""
-    dangerous = ['import os', 'import sys', '__import__', 'subprocess', 'open(', 'eval(', 'exec(', 'compile(']
+    if not code:
+        raise ValueError("Empty code")
+    dangerous = ['import os', 'import sys', '__import__', 'subprocess', 'open(', 'eval(', 'exec(', 'compile(', 'os.system', 'os.popen']
     code_lower = code.lower()
     for d in dangerous:
         if d in code_lower:
@@ -156,6 +212,8 @@ def run(question, df, history=None):
 
     # ── PLAN ───────────────────────────────────────────────────────────
     plan = None
+    raw_response = ""
+    
     for attempt in range(3):
         try:
             prompt = PLANNER_PROMPT.format(
@@ -163,9 +221,13 @@ def run(question, df, history=None):
                 question=question,
                 history=history_str if history_str else "None"
             )
-            raw = llm.call(prompt, "Generate analysis plan.")
-            raw = extract_json(raw)
-            plan = safe_json_loads(raw)
+            raw_response = llm.call(prompt, "Generate analysis plan.")
+            
+            if not raw_response:
+                raise ValueError("Empty response from LLM")
+            
+            extracted = extract_json(raw_response)
+            plan = safe_json_loads(extracted)
 
             if not isinstance(plan, list):
                 plan = [plan] if isinstance(plan, dict) else []
@@ -175,6 +237,7 @@ def run(question, df, history=None):
                 if not isinstance(step, dict):
                     continue
                     
+                # Ensure type exists
                 if "type" not in step:
                     code = step.get("code", "")
                     if "context_keys" in step:
@@ -186,9 +249,10 @@ def run(question, df, history=None):
                     else:
                         step["type"] = "unknown"
                 
-                if step["type"] in ["query", "plot"] and "code" not in step:
+                # Validate required fields
+                if step.get("type") in ["query", "plot"] and "code" not in step:
                     continue
-                if step["type"] == "reason" and "context_keys" not in step:
+                if step.get("type") == "reason" and "context_keys" not in step:
                     step["context_keys"] = []
                     
                 clean_plan.append(step)
@@ -201,10 +265,12 @@ def run(question, df, history=None):
 
         except Exception as e:
             if attempt == 2:
+                # Log the raw response for debugging (truncated)
+                debug_info = raw_response[:200] + "..." if len(raw_response) > 200 else raw_response
                 return {
-                    "answer": f"Unable to create analysis plan: {str(e)}. Try rephrasing your question.", 
+                    "answer": f"Unable to create analysis plan: {str(e)}. Try rephrasing your question with specific column names.", 
                     "fig": None, 
-                    "steps": [{"type": "error", "step": "planning", "error": str(e), "ok": False}]
+                    "steps": [{"type": "error", "step": "planning", "error": str(e), "ok": False, "debug": debug_info}]
                 }
 
     # ── ACT ────────────────────────────────────────────────────────────
