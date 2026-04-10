@@ -1,0 +1,5 @@
+[tool.pyright]
+include = ["."]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

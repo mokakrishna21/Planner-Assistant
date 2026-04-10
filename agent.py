@@ -36,9 +36,9 @@ Each step MUST include a "type" field. Valid types:
 - "reason" - for reasoning/context (requires "context_keys" field)
 
 Example steps:
-- {"type": "query", "goal": "Count rows where status is delayed", "code": "result = df[df['status'] == 'delayed'].shape[0]"}
-- {"type": "plot", "goal": "Bar chart of sales by category", "code": "fig = px.bar(df.groupby('category')['sales'].sum().reset_index(), x='category', y='sales')"}
-- {"type": "reason", "goal": "Analyze why there's a gap", "context_keys": ["step_0", "step_1"]}
+- {{"type": "query", "goal": "Count rows where status is delayed", "code": "result = df[df['status'] == 'delayed'].shape[0]"}}
+- {{"type": "plot", "goal": "Bar chart of sales by category", "code": "fig = px.bar(df.groupby('category')['sales'].sum().reset_index(), x='category', y='sales')"}}
+- {{"type": "reason", "goal": "Analyze why there's a gap", "context_keys": ["step_0", "step_1"]}}
 
 Rules:
 - Use df['exact_column']
