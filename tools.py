@@ -1,3 +1,4 @@
+import json
 import traceback
 import pandas as pd
 import numpy as np
@@ -6,18 +7,24 @@ import plotly.graph_objects as go
 
 
 def get_schema(df: pd.DataFrame) -> str:
-    schema = {col: str(dtype) for col, dtype in df.dtypes.items()}
-    sample = df.head(3).to_dict(orient="records")
+    """Return structured schema for LLM reasoning"""
+    schema = {
+        "columns": {col: str(dtype) for col, dtype in df.dtypes.items()},
+        "column_names": list(df.columns),
+        "sample_rows": df.head(5).to_dict(orient="records"),
+    }
 
-    stats = {}
+    numeric_stats = {}
     for col in df.select_dtypes(include="number").columns:
-        stats[col] = {
-            "min": df[col].min(),
-            "max": df[col].max(),
-            "mean": round(df[col].mean(), 2),
+        numeric_stats[col] = {
+            "min": float(df[col].min()),
+            "max": float(df[col].max()),
+            "mean": float(df[col].mean()),
         }
 
-    return str({"columns": schema, "sample_rows": sample, "numeric_stats": stats})
+    schema["numeric_stats"] = numeric_stats
+
+    return json.dumps(schema, default=str)
 
 
 def run_query(df, code, namespace):
@@ -50,8 +57,6 @@ def run_plot(df, code, namespace):
         fig.update_layout(
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
-            font=dict(family="monospace", size=12),
-            margin=dict(l=20, r=20, t=40, b=20),
         )
 
         return {"ok": True, "fig": fig}
