@@ -5,7 +5,7 @@ from groq import Groq
 load_dotenv()
 
 client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
-MODEL = "llama-3.1-8b-instant"
+MODEL = "llama-3.3-70b-versatile"
 
 
 def call(system_prompt, user_message, max_tokens=1500):
