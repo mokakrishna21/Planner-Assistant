@@ -3,6 +3,8 @@
 A lightweight conversational data assistant with a **Plan → Act → Reflect → Answer** agent loop.  
 Upload any spreadsheet, ask questions in plain English, get answers with auto-generated charts and insights.
 
+🚀 **[Live Demo](https://planner-assistant.streamlit.app/)**
+
 ---
 
 ## Setup
