@@ -1,25 +1,41 @@
 # Planner Assistant
 
-A lightweight conversational data assistant with a **Plan → Act → Reflect → Answer** agent loop.  
-Upload any spreadsheet, ask questions in plain English, get answers with auto-generated charts and insights.
+A lightweight conversational data assistant that follows a structured **Plan → Act → Reflect → Answer** loop.
+
+Upload any spreadsheet, ask questions in plain English, and get answers with charts and insights — not guesses.
 
 🚀 **[Live Demo](https://planner-assistant.streamlit.app/)**
 
 ---
 
+## Overview
+
+Most data chatbots rely on a single LLM response. That works for simple queries, but breaks quickly on anything involving multiple steps or reasoning.
+
+Planner Assistant takes a different approach:
+
+* Breaks questions into executable steps
+* Runs them sequentially using Pandas/Plotly
+* Validates intermediate outputs
+* Recovers automatically from errors
+
+The result is a system that behaves more like a data analyst than a chatbot.
+
+---
 
 ## Usage
 
-1. Upload any `.csv` or `.xlsx` file via the sidebar
+1. Upload a `.csv` or `.xlsx` file via the sidebar
 2. Ask questions in plain English
-3. Follow-up questions retain context from previous turns
+3. Continue with follow-up questions — context is preserved
 
-**Example questions to try:**
-- `How many unique products are in this data?`
-- `What is the average value grouped by category?`
-- `Plot throughput by day`
-- `Why is there a gap between these two entries?` ← tests reasoning
-- `Show only the top 10 from that` ← tests follow-up
+**Example questions:**
+
+* `How many unique products are in this data?`
+* `What is the average value grouped by category?`
+* `Plot throughput by day`
+* `Why is there a gap between these two entries?`
+* `Show only the top 10 from that`
 
 ---
 
@@ -57,138 +73,177 @@ flowchart TD
     style L fill:#1a1a2e,stroke:#2ea043,color:#fff
 ```
 
-### Agent Loop Detail
+---
+
+## Agent Loop
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                    Agent Loop                        │
-│                                                      │
-│  1. PLAN    → LLM reads schema + question            │
-│              → Outputs JSON: [{type, goal, code}]    │
-│                                                      │
-│  2. ACT     → Execute each step:                     │
-│              → query: pandas exec → result           │
-│              → plot:  plotly exec → fig               │
-│              → reason: collect context                │
-│                                                      │
-│  3. REFLECT → LLM validates intermediate results     │
-│              → If invalid → replan & retry            │
-│                                                      │
-│  4. ANSWER  → LLM synthesizes final response         │
-│              → Adds Insight if noteworthy             │
-└─────────────────────────────────────────────────────┘
+1. PLAN
+   LLM reads schema + question
+   Outputs structured steps
+
+2. ACT
+   Executes each step:
+   - query → pandas
+   - plot  → plotly
+   - reason → context aggregation
+
+3. REFLECT
+   Validates intermediate results
+   Fixes errors and replans if needed
+
+4. ANSWER
+   Generates final response with insights
 ```
-
-### Why This Matters (vs Single-Prompt)
-
-| Single Prompt | Plan-Act-Reflect |
-|---|---|
-| Fails on multi-hop questions | Breaks into steps, validates each |
-| Can't recover from wrong assumptions | Replans on bad intermediate results |
-| No auditability | Step log shown in UI |
-| LLM must hold all reasoning in one call | Each step is focused and verifiable |
 
 ---
 
-## How It Actually Works: End-to-End Flow
+## Why this approach works
 
-**1. File Upload & Setup (`app.py`)**  
-Uploading a CSV stores the DataFrame in `st.session_state` so it survives Streamlit's constant reruns without reloading from disk.
-
-**2. Schema Extraction (`tools.py`)**  
-`get_schema()` converts the dataset into a compact ~2KB JSON string containing: column names and types, 5 sample rows, numeric stats (min, max, mean, nulls), and unique values for categorical columns (up to 8). This summary is all the LLM ever sees—it never reads the full dataset directly.
-
-**3. Planning Phase (`agent.py`)**  
-When the user asks a question, the LLM processes it against the schema and up to 3 turns of conversational history to generate a JSON plan of sequential steps:
-- **query**: pandas code for calculations/filtering
-- **plot**: plotly code for charting
-- **reason**: pure reasoning based on previous outputs
-
-**4. Execution & Auto-Healing (`agent.py`)**  
-The steps execute sequentially in a persistent, shared Python environment (`exec_namespace`). If the generated code fails (e.g., a `KeyError`), the LLM automatically receives the exact error and schema to write a fix, retrying up to 2 times.
-
-**5. Synthesis (`agent.py`)**  
-The executed step results are gathered in a context dictionary (restricted to 10-row previews to save tokens). A final LLM pass uses these computed results to narrate a natural language answer with analytical insights.
+| Single Prompt                | Plan-Act-Reflect      |
+| ---------------------------- | --------------------- |
+| Breaks on multi-step queries | Decomposes into steps |
+| Silent failures              | Validates each step   |
+| No recovery                  | Auto-replanning       |
+| No transparency              | Step logs available   |
 
 ---
 
-## File Structure
+## How it works (end-to-end)
+
+### 1. File Upload (`app.py`)
+
+The dataset is stored in `st.session_state` to persist across Streamlit reruns 
+
+---
+
+### 2. Schema Extraction (`tools.py`)
+
+Instead of passing full data, the system sends a compact schema:
+
+* Column names and types
+* 5 sample rows
+* Numeric statistics (min, max, mean, nulls)
+* Categorical previews (up to 8 values)
+
+This keeps the system efficient and avoids token overflow.
+
+---
+
+### 3. Planning (`agent.py`)
+
+The LLM generates a JSON plan:
+
+* `query` → data manipulation
+* `plot` → visualization
+* `reason` → logical interpretation
+
+---
+
+### 4. Execution + Auto-Healing (`agent.py`)
+
+Steps run in a persistent namespace.
+
+If a step fails:
+
+* Error is captured
+* Sent back to the LLM
+* Code is rewritten and retried
+
+This retry logic is implemented in the agent loop 
+
+---
+
+### 5. Answer Generation
+
+All intermediate results are collected (with size limits), and the final answer is generated based only on computed outputs — not assumptions.
+
+---
+
+## Project Structure
 
 ```
-app.py           — Streamlit UI (upload, chat loop, render)
-agent.py         — ReAct loop (plan, act, reflect, answer)
-tools.py         — Pandas query executor + plotly chart executor
-llm.py           — LLM wrapper (Groq + Llama 3.3, swappable)
-requirements.txt — Python dependencies
-.env             — API key (not committed)
-README.md        — This file
+app.py           — Streamlit UI
+agent.py         — Plan → Act → Reflect → Answer loop
+tools.py         — Execution layer (pandas + plotly)
+llm.py           — LLM wrapper (Groq)
+requirements.txt — Dependencies
+.env             — API key
+README.md        — Documentation
 ```
 
 ---
 
 ## Tech Stack
 
-| Component | Choice | Why |
-|---|---|---|
-| **LLM** | Groq + Llama 3.3 70B | State-of-the-art inference speed, open-weights, swappable |
-| **UI** | Streamlit | Rapid prototyping, built-in data widgets |
-| **Data** | Pandas | Industry standard, handles CSV/Excel |
-| **Charts** | Plotly | Interactive, auto-renders in Streamlit |
-| **Agent** | Custom ReAct loop | Full control, no framework lock-in |
+| Component | Choice               | Reason                                |
+| --------- | -------------------- | ------------------------------------- |
+| LLM       | Groq + Llama 3.3 70B | Fast inference, open weights          |
+| UI        | Streamlit            | Simple and effective for data apps    |
+| Data      | Pandas               | Standard for tabular operations       |
+| Charts    | Plotly               | Interactive visualizations            |
+| Agent     | Custom loop          | Full control, no abstraction overhead |
 
 ---
 
-## Swapping the LLM Backend
+## Swapping the LLM
 
-All LLM calls route through `llm.py`. To switch to a self-hosted model (Ollama, vLLM):
+All model calls are isolated in `llm.py` 
 
 ```python
-# llm.py — change the client and model only
 from openai import OpenAI
 
 client = OpenAI(base_url="http://localhost:11434/v1", api_key="ollama")
 MODEL = "llama3"
 ```
 
-Everything else stays the same — agent logic, tools, and UI are fully decoupled.
+No other part of the system needs to change.
 
 ---
 
-## Latency Notes
+## Performance Notes
 
-Current bottlenecks (in order):
-1. **Planner call** — ~1-2s. Cacheable if same schema is reused.
-2. **Validator call** — ~0.5s per step. Can be skipped for simple questions.
-3. **Answer call** — ~1-2s. Stream this to reduce perceived latency.
+Current latency:
 
-To reduce to <1s total: cache the schema prompt, skip validation on low-complexity questions, stream the final answer.
+* Planner → ~1–2s
+* Validator → ~0.5s per step
+* Answer → ~1–2s
+
+Optimizations:
+
+* Cache schema prompt
+* Skip validation for simple queries
+* Stream final response
 
 ---
 
 ## Design Decisions
 
-- **No framework**: Built the agent loop from scratch (no LangChain/CrewAI) — fewer dependencies, full control, easier to debug and extend.
-- **Exec-based tools**: Using `exec()` for pandas/plotly gives the LLM full expressiveness. In production, this would be sandboxed.
-- **Validation loop**: The reflect step catches LLM hallucinations early — e.g., querying a column that doesn't exist — and triggers a replan instead of returning garbage.
-- **Conversation memory**: Last 6 turns are passed to both the planner and the answerer, enabling natural follow-ups like "show me just the top 5 from that".
+* Built without frameworks (no LangChain/CrewAI) for clarity and control
+* Uses `exec()` for flexibility (sandboxing required in production)
+* Validation loop prevents incorrect outputs from reaching the user
+* Maintains short conversational memory for efficient follow-ups
 
 ---
 
-## Magic Numbers & Parameters
+## Key Parameters
 
-Here's the one-line reason behind each number in case they ask on the spot:
+| Parameter            | Purpose                                         |
+| -------------------- | ----------------------------------------------- |
+| 6 history turns      | Supports follow-up queries without prompt bloat |
+| 3 planning attempts  | Handles malformed LLM outputs                   |
+| 2 retries per step   | Fixes most execution errors                     |
+| 5 sample rows        | Captures data shape efficiently                 |
+| 50 row cap           | Prevents context overflow                       |
+| 8 categorical values | Shows patterns without noise                    |
+| Temperature = 0      | Ensures deterministic code generation           |
 
-| Decision | Why |
-|---|---|
-| 6 history turns | Covers 3 full exchanges — enough for follow-ups, not enough to bloat the prompt |
-| 3 planning attempts | LLM JSON fails occasionally, but 3 tries = max 6 extra seconds before giving up |
-| 2 step retries | Code fix prompt is targeted enough that one retry almost always works |
-| 3 history turns in planner | Planner only needs intent context, not full conversation — keeps planning call lean |
-| 80 char truncation | LLM needs the gist, not the full answer paragraph |
-| 5 sample rows | Shows enough variation to understand data shape without bloating the schema |
-| 50 row cap on results | LLM context limit — full 50k rows would overflow it |
-| 8 categorical values | Enough to show the pattern (case, format, abbreviation style) without noise |
-| 4 JSON parse strategies | Each one fixes a specific, observed LLM failure mode |
-| Temperature 0 | Deterministic code gen — same question always produces the same pandas |
-| Persistent namespace | Without it, step 2 can't use variables step 1 created |
-| 6 suggested questions | Fills two columns cleanly, and the mix shows breadth not just aggregations |
+---
+
+## Limitations
+
+* Execution is not sandboxed yet
+* Large datasets rely on summarized schema
+* Multi-table joins are not supported
+
+---
