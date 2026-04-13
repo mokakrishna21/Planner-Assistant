@@ -111,14 +111,25 @@ flowchart TD
 
 ## How it works (end-to-end)
 
-### 1. File Upload (`app.py`)
+### 1. File Upload (`app.py` lines 117–127)
 
-The dataset is stored in `st.session_state` to persist across Streamlit reruns 
+```python
+if uploaded and uploaded.name != st.session_state.filename:
+    df = pd.read_csv(uploaded)
+    st.session_state.df = df
+```
+The dataset is stored in `st.session_state` to persist across Streamlit reruns.
 
 ---
 
-### 2. Schema Extraction (`tools.py`)
+### 2. Schema Extraction (`tools.py` lines 50–116)
 
+```python
+schema = {
+    "columns": {col: str(dtype) for col, dtype in df.dtypes.items()},
+    # ... adds sample rows, numeric stats, categorical info
+}
+```
 Instead of passing full data, the system sends a compact schema:
 
 * Column names and types
@@ -130,8 +141,11 @@ This keeps the system efficient and avoids token overflow.
 
 ---
 
-### 3. Planning (`agent.py`)
+### 3. Planning (`agent.py` lines 223–283)
 
+```python
+prompt = PLANNER_PROMPT.format(schema=schema, question=question, history=history_str)
+```
 The LLM generates a JSON plan:
 
 * `query` → data manipulation
@@ -140,8 +154,11 @@ The LLM generates a JSON plan:
 
 ---
 
-### 4. Execution + Auto-Healing (`agent.py`)
+### 4. Execution + Auto-Healing (`agent.py` lines 285–391)
 
+```python
+exec(code, exec_namespace)
+```
 Steps run in a persistent namespace.
 
 If a step fails:
@@ -150,12 +167,15 @@ If a step fails:
 * Sent back to the LLM
 * Code is rewritten and retried
 
-This retry logic is implemented in the agent loop 
+This retry logic is implemented in the agent loop.
 
 ---
 
-### 5. Answer Generation
+### 5. Answer Generation (`agent.py` lines 393–411)
 
+```python
+answer = llm.call(ANSWER_PROMPT.format(question=question, context=context_str))
+```
 All intermediate results are collected (with size limits), and the final answer is generated based only on computed outputs — not assumptions.
 
 ---
