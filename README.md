@@ -7,25 +7,6 @@ Upload any spreadsheet, ask questions in plain English, get answers with auto-ge
 
 ---
 
-## Setup
-
-```bash
-# 1. Clone / copy files
-git clone <repo-url> && cd Demo
-
-# 2. Install dependencies
-pip install -r requirements.txt
-
-# 3. Set API key (create .env file)
-echo "GROQ_API_KEY=gsk_your_key_here" > .env
-
-# 4. Run
-streamlit run app.py
-```
-
-**Requirements:** Python 3.9+, Groq API key ([console.groq.com](https://console.groq.com))
-
----
 
 ## Usage
 
@@ -109,6 +90,28 @@ flowchart TD
 
 ---
 
+## How It Actually Works: End-to-End Flow
+
+**1. File Upload & Setup (`app.py`)**  
+Uploading a CSV stores the DataFrame in `st.session_state` so it survives Streamlit's constant reruns without reloading from disk.
+
+**2. Schema Extraction (`tools.py`)**  
+`get_schema()` converts the dataset into a compact ~2KB JSON string containing: column names and types, 5 sample rows, numeric stats (min, max, mean, nulls), and unique values for categorical columns (up to 8). This summary is all the LLM ever sees—it never reads the full dataset directly.
+
+**3. Planning Phase (`agent.py`)**  
+When the user asks a question, the LLM processes it against the schema and up to 3 turns of conversational history to generate a JSON plan of sequential steps:
+- **query**: pandas code for calculations/filtering
+- **plot**: plotly code for charting
+- **reason**: pure reasoning based on previous outputs
+
+**4. Execution & Auto-Healing (`agent.py`)**  
+The steps execute sequentially in a persistent, shared Python environment (`exec_namespace`). If the generated code fails (e.g., a `KeyError`), the LLM automatically receives the exact error and schema to write a fix, retrying up to 2 times.
+
+**5. Synthesis (`agent.py`)**  
+The executed step results are gathered in a context dictionary (restricted to 10-row previews to save tokens). A final LLM pass uses these computed results to narrate a natural language answer with analytical insights.
+
+---
+
 ## File Structure
 
 ```
@@ -168,3 +171,24 @@ To reduce to <1s total: cache the schema prompt, skip validation on low-complexi
 - **Exec-based tools**: Using `exec()` for pandas/plotly gives the LLM full expressiveness. In production, this would be sandboxed.
 - **Validation loop**: The reflect step catches LLM hallucinations early — e.g., querying a column that doesn't exist — and triggers a replan instead of returning garbage.
 - **Conversation memory**: Last 6 turns are passed to both the planner and the answerer, enabling natural follow-ups like "show me just the top 5 from that".
+
+---
+
+## Magic Numbers & Parameters
+
+Here's the one-line reason behind each number in case they ask on the spot:
+
+| Decision | Why |
+|---|---|
+| 6 history turns | Covers 3 full exchanges — enough for follow-ups, not enough to bloat the prompt |
+| 3 planning attempts | LLM JSON fails occasionally, but 3 tries = max 6 extra seconds before giving up |
+| 2 step retries | Code fix prompt is targeted enough that one retry almost always works |
+| 3 history turns in planner | Planner only needs intent context, not full conversation — keeps planning call lean |
+| 80 char truncation | LLM needs the gist, not the full answer paragraph |
+| 5 sample rows | Shows enough variation to understand data shape without bloating the schema |
+| 50 row cap on results | LLM context limit — full 50k rows would overflow it |
+| 8 categorical values | Enough to show the pattern (case, format, abbreviation style) without noise |
+| 4 JSON parse strategies | Each one fixes a specific, observed LLM failure mode |
+| Temperature 0 | Deterministic code gen — same question always produces the same pandas |
+| Persistent namespace | Without it, step 2 can't use variables step 1 created |
+| 6 suggested questions | Fills two columns cleanly, and the mix shows breadth not just aggregations |
