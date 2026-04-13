@@ -253,10 +253,15 @@ Optimizations:
 | 6 history turns      | Supports follow-up queries without prompt bloat |
 | 3 planning attempts  | Handles malformed LLM outputs                   |
 | 2 retries per step   | Fixes most execution errors                     |
+| 3 planner history turns | Planner only needs intent context, keeps plan fast |
+| 80 char truncation   | LLM only needs the gist of prior conversational turns |
 | 5 sample rows        | Captures data shape efficiently                 |
 | 50 row cap           | Prevents context overflow                       |
 | 8 categorical values | Shows patterns without noise                    |
+| 4 JSON strategies    | Each fixes a specific, observed LLM failure mode|
 | Temperature = 0      | Ensures deterministic code generation           |
+| Persistent namespace | Allows later steps to reuse earlier variables   |
+| 6 suggested questions| Fills two columns cleanly, highlights breadth   |
 
 ---
 
